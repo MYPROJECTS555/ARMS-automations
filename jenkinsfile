@@ -1,0 +1,96 @@
+```groovy
+pipeline {
+    agent any
+
+    environment {
+        DB_SERVER  = '10.10.10.50'
+        DB_NAME    = 'ARMS'
+        BACKUP_DIR = 'D:\\SQLBackups'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/company/arms-database.git'
+            }
+        }
+
+        stage('Database Backup') {
+            steps {
+                bat """
+                    if not exist "%BACKUP_DIR%" mkdir "%BACKUP_DIR%"
+
+                    sqlcmd -S "%DB_SERVER%" -d "%DB_NAME%" -E -b -Q ^
+                    "BACKUP DATABASE [%DB_NAME%] ^
+                    TO DISK='%BACKUP_DIR%\\ARMS_%BUILD_NUMBER%.bak' ^
+                    WITH INIT, COMPRESSION"
+                """
+            }
+        }
+
+        stage('Find Changed SQL Files') {
+            steps {
+                script {
+                    def changedFiles = bat(
+                        script: 'git diff --name-only HEAD~1 HEAD',
+                        returnStdout: true
+                    ).trim()
+
+                    echo "Changed files:"
+                    echo changedFiles
+
+                    def sqlFiles = changedFiles
+                        .split("\\r?\\n")
+                        .findAll { file ->
+                            file.trim().toLowerCase().endsWith('.sql')
+                        }
+
+                    if (sqlFiles.isEmpty()) {
+                        echo "No SQL files were changed."
+                    } else {
+                        env.CHANGED_SQL_FILES = sqlFiles.join('|')
+                    }
+                }
+            }
+        }
+
+        stage('Execute Changed SQL') {
+            when {
+                expression {
+                    return env.CHANGED_SQL_FILES != null &&
+                           env.CHANGED_SQL_FILES.trim() != ''
+                }
+            }
+
+            steps {
+                script {
+                    env.CHANGED_SQL_FILES.split('\\|').each { file ->
+
+                        file = file.trim()
+
+                        echo "Executing SQL script: ${file}"
+
+                        bat """
+                            sqlcmd -S "%DB_SERVER%" -d "%DB_NAME%" -E -b ^
+                            -i "${file}"
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Database deployment successful'
+        }
+
+        failure {
+            echo 'Database deployment failed'
+        }
+    }
+}
+```
+
